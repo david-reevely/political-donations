@@ -34,10 +34,13 @@ jobs:
         run: |
           curl -fSL -o od.zip "https://www.elections.ca/fin/oda/od_cntrbtn_de_e.zip"
           unzip -o od.zip
-          ls -la od_cntrbtn_de_e.csv
+          CSV=$(find . -name 'od_cntrbtn_de_e.csv' | head -1)
+          if [ -z "$CSV" ]; then echo "CSV not found in zip"; exit 1; fi
+          echo "CSV_PATH=$CSV" >> "$GITHUB_ENV"
+          ls -la "$CSV"
 
       - name: Build search shards
-        run: python3 build_site.py od_cntrbtn_de_e.csv site 1024
+        run: python3 build_site.py "$CSV_PATH" site 1024
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
