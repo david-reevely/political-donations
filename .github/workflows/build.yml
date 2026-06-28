@@ -1,0 +1,47 @@
+name: Build and deploy contributor search
+
+# Rebuilds the search index from the latest Elections Canada file and publishes
+# the static site to GitHub Pages. The shards are built fresh each run and
+# deployed as the Pages artifact, so they never bloat the git repo.
+
+on:
+  schedule:
+    - cron: "0 9 * * 1"        # Mondays 09:00 UTC — adjust to taste
+  workflow_dispatch:            # lets you trigger a build by hand
+  push:
+    branches: [main]            # redeploy when you change the page/code
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download Elections Canada contributions (as filed)
+        run: |
+          curl -fSL -o od.zip "https://www.elections.ca/fin/oda/od_cntrbtn_de_e.zip"
+          unzip -o od.zip
+          ls -la od_cntrbtn_de_e.csv
+
+      - name: Build search shards
+        run: python3 build_site.py od_cntrbtn_de_e.csv site 1024
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4

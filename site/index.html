@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Contributor donation search</title>
+<style>
+:root{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;}
+body{margin:0;padding:1.2rem 1.5rem 4rem;color:#1a1a1a;max-width:1100px;}
+h1{font-size:1.15rem;margin:0 0 .8rem;}
+form{margin-bottom:1rem;}
+input[type=text]{font-size:1rem;padding:.45rem .6rem;width:24rem;max-width:70vw;
+  border:1px solid #888;border-radius:4px;}
+button{font-size:1rem;padding:.45rem .9rem;margin-left:.4rem;cursor:pointer;}
+.note{color:#555;font-size:.85rem;margin:.3rem 0 1rem;}
+table{border-collapse:collapse;width:100%;font-size:.86rem;margin:.3rem 0 1.4rem;}
+th,td{text-align:left;padding:.3rem .55rem;border-bottom:1px solid #e2e2e2;vertical-align:top;}
+th{background:#f4f4f4;border-bottom:1px solid #ccc;}
+td.num,th.num{text-align:right;white-space:nowrap;}
+.grp{margin-top:1.6rem;}
+.grp h2{font-size:.98rem;margin:0 0 .2rem;}
+.grp .meta{color:#555;font-size:.82rem;margin:0 0 .4rem;}
+.summary th,.summary td{font-size:.84rem;}
+.tot{font-weight:600;}
+.warn{background:#fff7e6;border:1px solid #f0c674;padding:.5rem .7rem;border-radius:4px;
+  font-size:.85rem;margin:.5rem 0 1rem;}
+.viewbar{margin:.1rem 0 1rem;}
+.viewbar a{display:inline-block;padding:.32rem .75rem;border:1px solid #bbb;text-decoration:none;
+  color:#333;border-radius:4px;margin-right:.35rem;font-size:.88rem;}
+.viewbar a.active{background:#1a1a1a;color:#fff;border-color:#1a1a1a;}
+.legend{font-size:.82rem;color:#444;margin:.1rem 0 .7rem;}
+.legend span{display:inline-block;margin-right:.9rem;white-space:nowrap;}
+.legend i{display:inline-block;width:.7rem;height:.7rem;border-radius:2px;margin-right:.28rem;
+  position:relative;top:.05rem;}
+table.chrono tr.party td:first-child{border-left:4px solid currentColor;}
+table.chrono td{font-variant-numeric:tabular-nums;}
+.foot{color:#888;font-size:.78rem;margin-top:2rem;border-top:1px solid #eee;padding-top:.6rem;}
+.status{color:#555;font-size:.9rem;}
+.err{color:#a4243b;}
+</style>
+</head>
+<body>
+<h1>Elections Canada contributor donation search</h1>
+
+<form id="f">
+  <input type="text" id="q" name="q" autocomplete="off" autofocus
+         placeholder="e.g. Smith, John  or  John Smith Ottawa">
+  <button type="submit">Search</button>
+</form>
+<p class="note">Search by surname (a first name or city narrows it).
+Matching is accent- and case-insensitive. Source: already-public Elections
+Canada data; contributor names are not unique identifiers, so check city /
+postal code before relying on a match.</p>
+
+<div id="results"></div>
+<div class="foot" id="foot"></div>
+
+<script src="./search.js"></script>
+<script src="./render.js"></script>
+<script>
+(function () {
+  "use strict";
+  var manifest = null, cache = {};
+  var results = document.getElementById("results");
+  var foot = document.getElementById("foot");
+
+  function setStatus(msg, isErr) {
+    results.innerHTML = "<p class='status" + (isErr ? " err" : "") + "'>" + msg + "</p>";
+  }
+
+  async function gunzipToText(buf) {
+    var u8 = new Uint8Array(buf);
+    if (u8[0] === 0x1f && u8[1] === 0x8b) {        // gzip magic
+      var stream = new Response(u8).body.pipeThrough(new DecompressionStream("gzip"));
+      return await new Response(stream).text();
+    }
+    return new TextDecoder().decode(u8);            // CDN already decompressed
+  }
+
+  async function loadBucket(b) {
+    if (cache[b]) return cache[b];
+    var resp = await fetch("./shards/s" + b + ".json.gz");
+    if (!resp.ok) {                                  // missing bucket = no rows
+      if (resp.status === 404) return (cache[b] = []);
+      throw new Error("shard " + b + ": HTTP " + resp.status);
+    }
+    var text = await gunzipToText(await resp.arrayBuffer());
+    return (cache[b] = Search.expandShard(JSON.parse(text)));
+  }
+
+  async function runSearch(q, view) {
+    if (!q) { results.innerHTML = ""; return; }
+    setStatus("Searching\u2026");
+    try {
+      var res = await Search.runQuery(q, manifest.nbuckets, loadBucket);
+      results.innerHTML = Render.renderResults(q, res.rows, res.truncated, view);
+    } catch (e) {
+      setStatus("Search failed: " + Render.esc(e.message), true);
+    }
+  }
+
+  function currentView() {
+    return new URLSearchParams(location.search).get("view") === "chrono" ? "chrono" : "recipient";
+  }
+
+  function go(q, view, push) {
+    var params = new URLSearchParams();
+    if (q) params.set("q", q);
+    params.set("view", view);
+    var url = "?" + params.toString();
+    if (push) history.pushState({}, "", url);
+    document.getElementById("q").value = q;
+    runSearch(q, view);
+  }
+
+  // Intercept view-toggle links for instant switching (keeps shareable URLs).
+  results.addEventListener("click", function (ev) {
+    var a = ev.target.closest && ev.target.closest(".viewbar a");
+    if (!a) return;
+    ev.preventDefault();
+    var p = new URLSearchParams(a.getAttribute("href").replace(/^\?/, ""));
+    go(p.get("q") || "", p.get("view") === "chrono" ? "chrono" : "recipient", true);
+  });
+
+  document.getElementById("f").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    go(document.getElementById("q").value.trim(), currentView(), true);
+  });
+
+  window.addEventListener("popstate", function () {
+    var p = new URLSearchParams(location.search);
+    go(p.get("q") || "", p.get("view") === "chrono" ? "chrono" : "recipient", false);
+  });
+
+  // ---- init --------------------------------------------------------------
+  if (typeof DecompressionStream === "undefined") {
+    setStatus("This tool needs a current browser (gzip decompression support).", true);
+    return;
+  }
+  fetch("./manifest.json").then(function (r) { return r.json(); }).then(function (m) {
+    manifest = m;
+    foot.textContent = "Data built " + m.built + " \u00b7 " +
+      m.rows.toLocaleString() + " contribution records \u00b7 " + m.source;
+    var p = new URLSearchParams(location.search);
+    var q = (p.get("q") || "").trim();
+    if (q) go(q, currentView(), false);
+  }).catch(function (e) {
+    setStatus("Couldn't load the data index (manifest.json): " + Render.esc(e.message), true);
+  });
+})();
+</script>
+</body>
+</html>

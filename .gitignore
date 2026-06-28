@@ -1,0 +1,10 @@
+# Local build artifacts and data — the CI job builds these fresh and deploys
+# them as the Pages artifact, so they are never committed.
+od.zip
+od_cntrbtn_de_e.csv
+site/shards/
+site/manifest.json
+__pycache__/
+*.pyc
+venv/
+.venv/
