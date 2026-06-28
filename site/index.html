@@ -27,16 +27,22 @@ td.num,th.num{text-align:right;white-space:nowrap;}
 .tot{font-weight:600;}
 .warn{background:#fff7e6;border:1px solid #f0c674;padding:.5rem .7rem;border-radius:4px;
   font-size:.85rem;margin:.5rem 0 1rem;}
-.viewbar{margin:.1rem 0 1rem;}
+.viewbar{margin:.1rem 0 .6rem;}
 .viewbar a{display:inline-block;padding:.32rem .75rem;border:1px solid #bbb;text-decoration:none;
   color:#333;border-radius:4px;margin-right:.35rem;font-size:.88rem;}
 .viewbar a.active{background:#1a1a1a;color:#fff;border-color:#1a1a1a;}
+.ctrl{display:inline-block;margin:0 0 1rem .1rem;font-size:.85rem;color:#333;cursor:pointer;}
+.ctrl .hint{color:#888;}
 .legend{font-size:.82rem;color:#444;margin:.1rem 0 .7rem;}
 .legend span{display:inline-block;margin-right:.9rem;white-space:nowrap;}
 .legend i{display:inline-block;width:.7rem;height:.7rem;border-radius:2px;margin-right:.28rem;
   position:relative;top:.05rem;}
 table.chrono tr.party td:first-child{border-left:4px solid currentColor;}
 table.chrono td{font-variant-numeric:tabular-nums;}
+.filing details{font-size:.8rem;}
+.filing summary{cursor:pointer;color:#0645ad;white-space:nowrap;}
+.filing ul{margin:.3rem 0;padding-left:1rem;}
+.filing .ent{color:#777;}
 .foot{color:#888;font-size:.78rem;margin-top:2rem;border-top:1px solid #eee;padding-top:.6rem;}
 .status{color:#555;font-size:.9rem;}
 .err{color:#a4243b;}
@@ -63,11 +69,11 @@ postal code before relying on a match.</p>
 <script>
 (function () {
   "use strict";
-  var state = { manifest: null, cache: {}, query: "", view: "recipient", rows: [], truncated: false };
+  var state = { manifest: null, cache: {}, query: "", view: "recipient",
+                rows: [], truncated: false, selected: {}, deduped: true };
   var results = document.getElementById("results");
   var foot = document.getElementById("foot");
   var SEP = "\u0000";
-  function comboKey(name, city, prov) { return name + SEP + city + SEP + prov; }
 
   function setStatus(msg, isErr) {
     results.innerHTML = "<p class='status" + (isErr ? " err" : "") + "'>" + msg + "</p>";
@@ -93,96 +99,65 @@ postal code before relying on a match.</p>
     return (state.cache[b] = Search.expandShard(JSON.parse(text)));
   }
 
-  // Map ticked picker rows back to combo keys. Returns null when nothing is
-  // ticked (meaning: show everyone).
-  function selectedKeys() {
-    var checked = results.querySelectorAll(".pick:checked");
-    if (!checked.length) return null;
-    var summary = Search.summarize(state.rows), keys = {};
-    checked.forEach(function (cb) {
-      var s = summary[+cb.dataset.i];
-      if (s) keys[comboKey(s.name, s.city, s.province)] = true;
-    });
-    return keys;
-  }
-
-  function applySelection() {
-    var keys = selectedKeys();
-    var rows = state.rows;
-    if (keys) rows = rows.filter(function (r) { return keys[comboKey(r.name, r.city, r.prov)]; });
-    var lists = document.getElementById("lists");
-    if (lists) lists.innerHTML = Render.renderLists(rows, state.view);
-    results.querySelectorAll("#picker tr[data-i]").forEach(function (tr) {
-      var cb = tr.querySelector(".pick");
-      if (cb) tr.classList.toggle("sel", cb.checked);
-    });
+  function render() {
+    results.innerHTML = Render.renderResults(state.query, state.rows, state.truncated,
+      { view: state.view, deduped: state.deduped, selected: state.selected });
     var clear = results.querySelector(".clearsel");
-    if (clear) clear.style.display = keys ? "" : "none";
+    if (clear) clear.style.display = Object.keys(state.selected).length ? "" : "none";
   }
 
-  function switchView(view) {
-    state.view = view;
-    results.querySelectorAll(".viewbar a").forEach(function (a) {
-      a.classList.toggle("active", a.dataset.view === view);
-    });
-    var p = new URLSearchParams();
-    if (state.query) p.set("q", state.query);
-    p.set("view", view);
-    history.pushState({}, "", "?" + p.toString());
-    applySelection();
-  }
-
-  async function runSearch(q, view) {
-    state.query = q; state.view = view;
+  async function runSearch(q) {
+    state.query = q;
+    state.selected = {};
     if (!q) { results.innerHTML = ""; return; }
     setStatus("Searching\u2026");
     try {
       var res = await Search.runQuery(q, state.manifest.nbuckets, loadBucket);
       state.rows = res.rows; state.truncated = res.truncated;
-      results.innerHTML = Render.renderResults(q, res.rows, res.truncated, view);
+      render();
     } catch (e) {
       setStatus("Search failed: " + Render.esc(e.message), true);
     }
   }
 
-  function go(q, view, push) {
-    if (push) {
-      var p = new URLSearchParams();
-      if (q) p.set("q", q);
-      p.set("view", view);
-      history.pushState({}, "", "?" + p.toString());
-    }
-    document.getElementById("q").value = q;
-    runSearch(q, view);
+  function updateUrl(push) {
+    var p = new URLSearchParams();
+    if (state.query) p.set("q", state.query);
+    p.set("view", state.view);
+    history[push ? "pushState" : "replaceState"]({}, "", "?" + p.toString());
   }
 
-  function viewFromUrl() {
-    return new URLSearchParams(location.search).get("view") === "chrono" ? "chrono" : "recipient";
-  }
-
-  // Delegated handlers, attached once to the persistent results container.
+  // Delegated handlers on the persistent results container.
   results.addEventListener("change", function (ev) {
-    if (ev.target.classList && ev.target.classList.contains("pick")) applySelection();
+    var t = ev.target;
+    if (t.id === "dedupe") { state.deduped = t.checked; render(); return; }
+    if (t.classList && t.classList.contains("pick")) {
+      var tr = t.closest("tr");
+      var key = tr.dataset.name + SEP + tr.dataset.city + SEP + tr.dataset.prov;
+      if (t.checked) state.selected[key] = true; else delete state.selected[key];
+      render();
+    }
   });
   results.addEventListener("click", function (ev) {
     var a = ev.target.closest && ev.target.closest(".viewbar a");
-    if (a) { ev.preventDefault(); switchView(a.dataset.view === "chrono" ? "chrono" : "recipient"); return; }
+    if (a) { ev.preventDefault(); state.view = a.dataset.view === "chrono" ? "chrono" : "recipient"; updateUrl(true); render(); return; }
     var c = ev.target.closest && ev.target.closest(".clearsel");
-    if (c) {
-      ev.preventDefault();
-      results.querySelectorAll(".pick:checked").forEach(function (cb) { cb.checked = false; });
-      applySelection();
-    }
+    if (c) { ev.preventDefault(); state.selected = {}; render(); }
   });
 
   document.getElementById("f").addEventListener("submit", function (ev) {
     ev.preventDefault();
-    go(document.getElementById("q").value.trim(), state.view, true);
+    state.query = document.getElementById("q").value.trim();
+    updateUrl(true);
+    runSearch(state.query);
   });
 
   window.addEventListener("popstate", function () {
     var p = new URLSearchParams(location.search);
-    go((p.get("q") || "").trim(), p.get("view") === "chrono" ? "chrono" : "recipient", false);
+    state.view = p.get("view") === "chrono" ? "chrono" : "recipient";
+    var q = (p.get("q") || "").trim();
+    document.getElementById("q").value = q;
+    runSearch(q);
   });
 
   // ---- init --------------------------------------------------------------
@@ -195,8 +170,9 @@ postal code before relying on a match.</p>
     foot.textContent = "Data built " + m.built + " \u00b7 " +
       m.rows.toLocaleString() + " contribution records \u00b7 " + m.source;
     var p = new URLSearchParams(location.search);
+    state.view = p.get("view") === "chrono" ? "chrono" : "recipient";
     var q = (p.get("q") || "").trim();
-    if (q) go(q, viewFromUrl(), false);
+    if (q) { document.getElementById("q").value = q; runSearch(q); }
   }).catch(function (e) {
     setStatus("Couldn't load the data index (manifest.json): " + Render.esc(e.message), true);
   });

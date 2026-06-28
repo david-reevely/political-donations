@@ -69,7 +69,9 @@
         nonmon: r[12] / 100,
         event: d.v[r[13]] || "",
         given: r[14],
-        leader: r[15]
+        leader: r[15],
+        report: (d.f && d.f[r[16]]) || "",
+        part: (d.g && d.g[r[17]]) || ""
       });
     }
     return out;
@@ -162,12 +164,82 @@
     });
   }
 
+  // ---- deduplication -----------------------------------------------------
+  // The "as filed" file stacks the same contribution from overlapping returns:
+  // interim weekly vs final leadership returns, quarterly vs comprehensive party
+  // returns, and directed contributions reported by both the party and the
+  // leadership campaign. We collapse those to one row per real gift, attributing
+  // directed contributions to the leadership campaign, and keep the raw filings
+  // on each survivor (.merged) so the UI can expand them.
+
+  function cents(x) { return Math.round((x || 0) * 100); }
+
+  function reportPriority(r) {
+    var t = (r.report || "").toLowerCase();
+    if (t.indexOf("weekly") !== -1) return 1;     // interim, superseded
+    if (t.indexOf("quarterly") !== -1) return 2;  // periodic
+    return 3;                                      // final / comprehensive
+  }
+  function isDirected(r) { return (r.part || "").toLowerCase().indexOf("directed") !== -1; }
+  function entitySide(r) {
+    var e = (r.entity || "").toLowerCase();
+    if (e.indexOf("parties") !== -1) return "party";
+    if (e.indexOf("leadership") !== -1) return "leadership";
+    return "other";
+  }
+
+  function dedupe(rows) {
+    // Stage 1: collapse identical gifts (same recipient, date, amount) that
+    // recur across different returns; keep the most authoritative as canonical.
+    var groups = {};
+    rows.forEach(function (r) {
+      var k = [r.recipient, r.date, cents(r.mon), cents(r.nonmon)].join("\u0000");
+      (groups[k] || (groups[k] = [])).push(r);
+    });
+    var stage1 = [];
+    Object.keys(groups).forEach(function (k) {
+      var g = groups[k], canon = g[0];
+      for (var i = 1; i < g.length; i++) {
+        if (reportPriority(g[i]) > reportPriority(canon)) canon = g[i];
+      }
+      var c = {};
+      for (var key in canon) if (canon.hasOwnProperty(key)) c[key] = canon[key];
+      c.merged = g.slice();
+      stage1.push(c);
+    });
+
+    // Stage 2: a directed contribution shows up on both the party's books and
+    // the leadership campaign's; merge the party-side row into the matching
+    // leadership-side row (same date + amount), attributing it to the campaign.
+    var leadIndex = {};
+    stage1.forEach(function (r) {
+      if (isDirected(r) && entitySide(r) === "leadership") {
+        var k = [r.date, cents(r.mon), cents(r.nonmon)].join("\u0000");
+        (leadIndex[k] || (leadIndex[k] = [])).push(r);
+      }
+    });
+    var dropped = [];
+    var keep = stage1.filter(function (r) {
+      if (isDirected(r) && entitySide(r) === "party") {
+        var k = [r.date, cents(r.mon), cents(r.nonmon)].join("\u0000");
+        var ls = leadIndex[k];
+        if (ls && ls.length) {
+          ls[0].merged = ls[0].merged.concat(r.merged);
+          dropped.push(r);
+          return false;
+        }
+      }
+      return true;
+    });
+    return keep;
+  }
+
   var api = {
     RESULT_LIMIT: RESULT_LIMIT,
     normalize: normalize, fnv1a32: fnv1a32, tokenize: tokenize,
     queryBuckets: queryBuckets, expandShard: expandShard, matchRow: matchRow,
     runQuery: runQuery, partyColor: partyColor, summarize: summarize,
-    groupByRecipient: groupByRecipient, sortChrono: sortChrono
+    groupByRecipient: groupByRecipient, sortChrono: sortChrono, dedupe: dedupe
   };
 
   if (typeof module !== "undefined" && module.exports) module.exports = api;

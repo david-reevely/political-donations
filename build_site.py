@@ -34,6 +34,7 @@ csv.field_size_limit(1 << 24)
 # ---- source column positions (validated against the header) ----------------
 I_ENTITY, I_RECIPIENT, I_PARTY, I_DISTRICT, I_EVENT = 0, 2, 6, 7, 8
 I_FISCAL, I_CTYPE, I_CNAME, I_CLAST = 9, 14, 15, 16
+I_FR, I_FRP = 11, 13          # Financial Report (type), Financial Report part
 I_CITY, I_PROV, I_POSTAL, I_RECVD = 19, 20, 21, 22
 I_MONETARY, I_NONMON, I_GIVEN, I_LEADER = 23, 24, 25, 26
 
@@ -78,9 +79,11 @@ def parse_cents(s: str) -> int:
 
 
 def clean(s: str) -> str:
-    """Strip and remove tab/newline so the field survives the tab-delimited
-    temp file used between passes."""
-    return s.strip().replace("\t", " ").replace("\r", " ").replace("\n", " ")
+    """Strip whitespace, drop any stray BOM (the file is concatenated exports,
+    each starting with one), and remove tab/newline so the field survives the
+    tab-delimited temp file used between passes."""
+    return (s.replace("\ufeff", "").strip()
+            .replace("\t", " ").replace("\r", " ").replace("\n", " "))
 
 
 def build(csv_path, out_dir, nbuckets):
@@ -122,6 +125,7 @@ def build(csv_path, out_dir, nbuckets):
                 str(parse_cents(row[I_NONMON])), clean(row[I_EVENT]),
                 clean(row[I_GIVEN]) if len(row) > I_GIVEN else "",
                 clean(row[I_LEADER]) if len(row) > I_LEADER else "",
+                clean(row[I_FR]), clean(row[I_FRP]),
             ))
 
             buckets = {fnv1a32(t) % nbuckets for t in surname_tokens}
@@ -146,8 +150,8 @@ def build(csv_path, out_dir, nbuckets):
     written = [False] * nbuckets
 
     def flush(bucket, lines):
-        dicts = {"r": {}, "p": {}, "t": {}, "e": {}, "c": {}, "v": {}}
-        order = {"r": [], "p": [], "t": [], "e": [], "c": [], "v": []}
+        dicts = {"r": {}, "p": {}, "t": {}, "e": {}, "c": {}, "v": {}, "f": {}, "g": {}}
+        order = {"r": [], "p": [], "t": [], "e": [], "c": [], "v": [], "f": [], "g": []}
 
         def code(key, val):
             d = dicts[key]
@@ -158,7 +162,7 @@ def build(csv_path, out_dir, nbuckets):
 
         rows = []
         for ln in lines:
-            f = ln.split("\t")
+            f = ln.rstrip("\n").split("\t")
             # f[0] is bucket; row fields follow
             rows.append([
                 int(f[1]),                 # id
@@ -176,7 +180,9 @@ def build(csv_path, out_dir, nbuckets):
                 int(f[13]),                # non-monetary cents
                 code("v", f[14]),          # event
                 f[15],                     # given_through
-                f[16].rstrip("\n"),        # leadership contestant
+                f[16],                     # leadership contestant
+                code("f", f[17]),          # financial report (type)
+                code("g", f[18]),          # financial report part
             ])
         payload = {"d": {k: order[k] for k in order}, "rows": rows}
         data = json.dumps(payload, ensure_ascii=False,
@@ -202,7 +208,7 @@ def build(csv_path, out_dir, nbuckets):
     os.remove(sorted_path)
 
     # Empty buckets get an empty shard so the client never 404s.
-    empty = json.dumps({"d": {k: [] for k in "rptecv"}, "rows": []},
+    empty = json.dumps({"d": {k: [] for k in "rptecvfg"}, "rows": []},
                        separators=(",", ":")).encode("utf-8")
     for b in range(nbuckets):
         if not written[b]:
