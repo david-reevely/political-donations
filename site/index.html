@@ -21,6 +21,9 @@ td.num,th.num{text-align:right;white-space:nowrap;}
 .grp h2{font-size:.98rem;margin:0 0 .2rem;}
 .grp .meta{color:#555;font-size:.82rem;margin:0 0 .4rem;}
 .summary th,.summary td{font-size:.84rem;}
+.summary td:first-child,.summary th:first-child{width:1.6rem;text-align:center;}
+.summary tr.sel{background:#eef6ff;}
+.summary input.pick{cursor:pointer;}
 .tot{font-weight:600;}
 .warn{background:#fff7e6;border:1px solid #f0c674;padding:.5rem .7rem;border-radius:4px;
   font-size:.85rem;margin:.5rem 0 1rem;}
@@ -60,9 +63,11 @@ postal code before relying on a match.</p>
 <script>
 (function () {
   "use strict";
-  var manifest = null, cache = {};
+  var state = { manifest: null, cache: {}, query: "", view: "recipient", rows: [], truncated: false };
   var results = document.getElementById("results");
   var foot = document.getElementById("foot");
+  var SEP = "\u0000";
+  function comboKey(name, city, prov) { return name + SEP + city + SEP + prov; }
 
   function setStatus(msg, isErr) {
     results.innerHTML = "<p class='status" + (isErr ? " err" : "") + "'>" + msg + "</p>";
@@ -70,66 +75,114 @@ postal code before relying on a match.</p>
 
   async function gunzipToText(buf) {
     var u8 = new Uint8Array(buf);
-    if (u8[0] === 0x1f && u8[1] === 0x8b) {        // gzip magic
+    if (u8[0] === 0x1f && u8[1] === 0x8b) {
       var stream = new Response(u8).body.pipeThrough(new DecompressionStream("gzip"));
       return await new Response(stream).text();
     }
-    return new TextDecoder().decode(u8);            // CDN already decompressed
+    return new TextDecoder().decode(u8);
   }
 
   async function loadBucket(b) {
-    if (cache[b]) return cache[b];
+    if (state.cache[b]) return state.cache[b];
     var resp = await fetch("./shards/s" + b + ".json.gz");
-    if (!resp.ok) {                                  // missing bucket = no rows
-      if (resp.status === 404) return (cache[b] = []);
+    if (!resp.ok) {
+      if (resp.status === 404) return (state.cache[b] = []);
       throw new Error("shard " + b + ": HTTP " + resp.status);
     }
     var text = await gunzipToText(await resp.arrayBuffer());
-    return (cache[b] = Search.expandShard(JSON.parse(text)));
+    return (state.cache[b] = Search.expandShard(JSON.parse(text)));
+  }
+
+  // Map ticked picker rows back to combo keys. Returns null when nothing is
+  // ticked (meaning: show everyone).
+  function selectedKeys() {
+    var checked = results.querySelectorAll(".pick:checked");
+    if (!checked.length) return null;
+    var summary = Search.summarize(state.rows), keys = {};
+    checked.forEach(function (cb) {
+      var s = summary[+cb.dataset.i];
+      if (s) keys[comboKey(s.name, s.city, s.province)] = true;
+    });
+    return keys;
+  }
+
+  function applySelection() {
+    var keys = selectedKeys();
+    var rows = state.rows;
+    if (keys) rows = rows.filter(function (r) { return keys[comboKey(r.name, r.city, r.prov)]; });
+    var lists = document.getElementById("lists");
+    if (lists) lists.innerHTML = Render.renderLists(rows, state.view);
+    results.querySelectorAll("#picker tr[data-i]").forEach(function (tr) {
+      var cb = tr.querySelector(".pick");
+      if (cb) tr.classList.toggle("sel", cb.checked);
+    });
+    var clear = results.querySelector(".clearsel");
+    if (clear) clear.style.display = keys ? "" : "none";
+  }
+
+  function switchView(view) {
+    state.view = view;
+    results.querySelectorAll(".viewbar a").forEach(function (a) {
+      a.classList.toggle("active", a.dataset.view === view);
+    });
+    var p = new URLSearchParams();
+    if (state.query) p.set("q", state.query);
+    p.set("view", view);
+    history.pushState({}, "", "?" + p.toString());
+    applySelection();
   }
 
   async function runSearch(q, view) {
+    state.query = q; state.view = view;
     if (!q) { results.innerHTML = ""; return; }
     setStatus("Searching\u2026");
     try {
-      var res = await Search.runQuery(q, manifest.nbuckets, loadBucket);
+      var res = await Search.runQuery(q, state.manifest.nbuckets, loadBucket);
+      state.rows = res.rows; state.truncated = res.truncated;
       results.innerHTML = Render.renderResults(q, res.rows, res.truncated, view);
     } catch (e) {
       setStatus("Search failed: " + Render.esc(e.message), true);
     }
   }
 
-  function currentView() {
-    return new URLSearchParams(location.search).get("view") === "chrono" ? "chrono" : "recipient";
-  }
-
   function go(q, view, push) {
-    var params = new URLSearchParams();
-    if (q) params.set("q", q);
-    params.set("view", view);
-    var url = "?" + params.toString();
-    if (push) history.pushState({}, "", url);
+    if (push) {
+      var p = new URLSearchParams();
+      if (q) p.set("q", q);
+      p.set("view", view);
+      history.pushState({}, "", "?" + p.toString());
+    }
     document.getElementById("q").value = q;
     runSearch(q, view);
   }
 
-  // Intercept view-toggle links for instant switching (keeps shareable URLs).
+  function viewFromUrl() {
+    return new URLSearchParams(location.search).get("view") === "chrono" ? "chrono" : "recipient";
+  }
+
+  // Delegated handlers, attached once to the persistent results container.
+  results.addEventListener("change", function (ev) {
+    if (ev.target.classList && ev.target.classList.contains("pick")) applySelection();
+  });
   results.addEventListener("click", function (ev) {
     var a = ev.target.closest && ev.target.closest(".viewbar a");
-    if (!a) return;
-    ev.preventDefault();
-    var p = new URLSearchParams(a.getAttribute("href").replace(/^\?/, ""));
-    go(p.get("q") || "", p.get("view") === "chrono" ? "chrono" : "recipient", true);
+    if (a) { ev.preventDefault(); switchView(a.dataset.view === "chrono" ? "chrono" : "recipient"); return; }
+    var c = ev.target.closest && ev.target.closest(".clearsel");
+    if (c) {
+      ev.preventDefault();
+      results.querySelectorAll(".pick:checked").forEach(function (cb) { cb.checked = false; });
+      applySelection();
+    }
   });
 
   document.getElementById("f").addEventListener("submit", function (ev) {
     ev.preventDefault();
-    go(document.getElementById("q").value.trim(), currentView(), true);
+    go(document.getElementById("q").value.trim(), state.view, true);
   });
 
   window.addEventListener("popstate", function () {
     var p = new URLSearchParams(location.search);
-    go(p.get("q") || "", p.get("view") === "chrono" ? "chrono" : "recipient", false);
+    go((p.get("q") || "").trim(), p.get("view") === "chrono" ? "chrono" : "recipient", false);
   });
 
   // ---- init --------------------------------------------------------------
@@ -138,12 +191,12 @@ postal code before relying on a match.</p>
     return;
   }
   fetch("./manifest.json").then(function (r) { return r.json(); }).then(function (m) {
-    manifest = m;
+    state.manifest = m;
     foot.textContent = "Data built " + m.built + " \u00b7 " +
       m.rows.toLocaleString() + " contribution records \u00b7 " + m.source;
     var p = new URLSearchParams(location.search);
     var q = (p.get("q") || "").trim();
-    if (q) go(q, currentView(), false);
+    if (q) go(q, viewFromUrl(), false);
   }).catch(function (e) {
     setStatus("Couldn't load the data index (manifest.json): " + Render.esc(e.message), true);
   });
